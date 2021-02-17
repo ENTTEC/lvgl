@@ -45,6 +45,7 @@ static void indev_drag_throw(lv_indev_proc_t * proc);
 static lv_obj_t * get_dragged_obj(lv_obj_t * obj);
 static void indev_gesture(lv_indev_proc_t * proc);
 static bool indev_reset_check(lv_indev_proc_t * proc);
+static void indev_keypad2_proc(lv_indev_t * i, lv_indev_data_t * data);
 
 /**********************
  *  STATIC VARIABLES
@@ -110,7 +111,7 @@ void _lv_indev_read_task(lv_task_t * task)
             indev_pointer_proc(indev_act, &data);
         }
         else if(indev_act->driver.type == LV_INDEV_TYPE_KEYPAD) {
-            indev_keypad_proc(indev_act, &data);
+            indev_keypad2_proc(indev_act, &data);
         }
         else if(indev_act->driver.type == LV_INDEV_TYPE_ENCODER) {
             indev_encoder_proc(indev_act, &data);
@@ -1148,12 +1149,7 @@ lv_obj_t * lv_indev_search_obj(lv_obj_t * obj, lv_point_t * point)
                 hidden_i = lv_obj_get_parent(hidden_i);
             }
             /*No parent found with hidden == true*/
-            if(lv_obj_is_protected(obj, LV_PROTECT_EVENT_TO_DISABLED) == false) {
-                if(hidden_i == NULL && (lv_obj_get_state(obj, LV_OBJ_PART_MAIN) & LV_STATE_DISABLED) == false) found_p = obj;
-            }
-            else {
-                if(hidden_i == NULL) found_p = obj;
-            }
+            if(hidden_i == NULL && (lv_obj_get_state(obj, LV_OBJ_PART_MAIN) & LV_STATE_DISABLED) == false) found_p = obj;
         }
     }
 
@@ -1554,4 +1550,206 @@ static bool indev_reset_check(lv_indev_proc_t * proc)
     }
 
     return proc->reset_query ? true : false;
+}
+
+/**
+ * Process a new point from LV_INDEV_TYPE_KEYPAD input device
+ * @param i pointer to an input device
+ * @param data pointer to the data read from the input device
+ */
+static void indev_keypad2_proc(lv_indev_t * i, lv_indev_data_t * data)
+{
+#if LV_USE_GROUP
+    if(data->state == LV_INDEV_STATE_PR && i->proc.wait_until_release) return;
+
+    if(i->proc.wait_until_release) {
+        i->proc.wait_until_release      = 0;
+        i->proc.pr_timestamp            = 0;
+        i->proc.long_pr_sent            = 0;
+        i->proc.types.keypad.last_state = LV_INDEV_STATE_REL; /*To skip the processing of release*/
+    }
+
+    lv_group_t * g = i->group;
+    if(g == NULL) return;
+
+    indev_obj_act = lv_group_get_focused(g);
+    if(indev_obj_act == NULL) return;
+
+    /*Save the last key to compare it with the current latter on RELEASE*/
+    uint32_t prev_key = i->proc.types.keypad.last_key;
+
+    /* Save the last key.
+     * It must be done here else `lv_indev_get_key` will return the last key in events and signals*/
+    i->proc.types.keypad.last_key = data->key;
+
+    /* Save the previous state so we can detect state changes below and also set the last state now
+     * so if any signal/event handler on the way returns `LV_RES_INV` the last state is remembered
+     * for the next time*/
+    uint32_t prev_state             = i->proc.types.keypad.last_state;
+    i->proc.types.keypad.last_state = data->state;
+
+    /*Key press happened*/
+    if(data->state == LV_INDEV_STATE_PR && prev_state == LV_INDEV_STATE_REL) {
+        i->proc.pr_timestamp = lv_tick_get();
+
+        /*Simulate a press on the object if ENTER was pressed*/
+        if(data->key == LV_KEY_ENTER) {
+            bool editable = false;
+            lv_obj_type_t tmp;
+            lv_obj_get_type(indev_obj_act, &tmp);
+
+            indev_obj_act->signal_cb(indev_obj_act, LV_SIGNAL_GET_EDITABLE, &editable);
+            if (strcmp(tmp.type[0],"lv_spinbox")!=0 &&
+                    strcmp(tmp.type[0],"lv_dropdown")!=0)
+            {
+                editable=false;
+            }
+
+            /*On Enter press enter edit mode.*/
+            if(editable && lv_group_get_editing(g) == false) {
+                lv_group_set_editing(g, true); /*Enter edit mode on Enter press*/
+            } else if (editable && lv_group_get_editing(g) == true)
+            {
+                lv_group_set_editing(g, false); /*Enter edit mode on repeated Enter press*/
+            }
+            else {
+                /*Send the ENTER as a normal KEY*/
+                lv_group_send_data(g, LV_KEY_ENTER);
+
+                indev_obj_act->signal_cb(indev_obj_act, LV_SIGNAL_PRESSED, NULL);
+                if(indev_reset_check(&i->proc)) return;
+                lv_event_send(indev_obj_act, LV_EVENT_PRESSED, NULL);
+                if(indev_reset_check(&i->proc)) return;
+            }
+        }
+        else if(data->key == LV_KEY_ESC) {
+            bool editable = false;
+            indev_obj_act->signal_cb(indev_obj_act, LV_SIGNAL_GET_EDITABLE, &editable);
+
+            /*On Esc press exit edit mode. Don't leave edit mode if there is only one object (nowhere to navigate).*/
+            if(lv_group_get_editing(g) && _lv_ll_is_empty(&g->obj_ll) == false) {
+                lv_group_set_editing(g, false); /*Exit edit mode on Esc press*/
+            } else {
+                /*Send the ESC as a normal KEY*/
+                lv_group_send_data(g, LV_KEY_ESC);
+
+                lv_event_send(indev_obj_act, LV_EVENT_CANCEL, NULL);
+                if(indev_reset_check(&i->proc)) return;
+            }
+        }
+        /*Move the focus on NEXT*/
+        else if(data->key == LV_KEY_NEXT) {
+            /*In editing mode send DOWN key*/
+            if(lv_group_get_editing(g)) {
+                lv_group_send_data(g, LV_KEY_DOWN);
+            } else {
+                lv_group_focus_next(g);
+                if(indev_reset_check(&i->proc)) return;
+            }
+        }
+        /*Move the focus on PREV*/
+        else if(data->key == LV_KEY_PREV) {
+            /*In editing mode send UP key*/
+            if(lv_group_get_editing(g)) {
+                lv_group_send_data(g, LV_KEY_UP);
+            } else {
+                lv_group_focus_prev(g);
+                if(indev_reset_check(&i->proc)) return;
+            }
+        }
+        /*Just send other keys to the object (e.g. 'A' or `LV_GROUP_KEY_RIGHT`)*/
+        else {
+            lv_group_send_data(g, data->key);
+        }
+    }
+    /*Pressing*/
+    else if(data->state == LV_INDEV_STATE_PR && prev_state == LV_INDEV_STATE_PR) {
+
+        if(data->key == LV_KEY_ENTER) {
+            indev_obj_act->signal_cb(indev_obj_act, LV_SIGNAL_PRESSING, NULL);
+            if(indev_reset_check(&i->proc)) return;
+            lv_event_send(indev_obj_act, LV_EVENT_PRESSING, NULL);
+            if(indev_reset_check(&i->proc)) return;
+        }
+
+        /*Long press time has elapsed?*/
+        if(i->proc.long_pr_sent == 0 && lv_tick_elaps(i->proc.pr_timestamp) > i->driver.long_press_time) {
+            i->proc.long_pr_sent = 1;
+            if(data->key == LV_KEY_ENTER) {
+                i->proc.longpr_rep_timestamp = lv_tick_get();
+                indev_obj_act->signal_cb(indev_obj_act, LV_SIGNAL_LONG_PRESS, NULL);
+                if(indev_reset_check(&i->proc)) return;
+                lv_event_send(indev_obj_act, LV_EVENT_LONG_PRESSED, NULL);
+                if(indev_reset_check(&i->proc)) return;
+            }
+        }
+        /*Long press repeated time has elapsed?*/
+        else if(i->proc.long_pr_sent != 0 &&
+                lv_tick_elaps(i->proc.longpr_rep_timestamp) > i->driver.long_press_rep_time) {
+
+            i->proc.longpr_rep_timestamp = lv_tick_get();
+
+            /*Send LONG_PRESS_REP on ENTER*/
+            if(data->key == LV_KEY_ENTER) {
+                indev_obj_act->signal_cb(indev_obj_act, LV_SIGNAL_LONG_PRESS_REP, NULL);
+                if(indev_reset_check(&i->proc)) return;
+                lv_event_send(indev_obj_act, LV_EVENT_LONG_PRESSED_REPEAT, NULL);
+                if(indev_reset_check(&i->proc)) return;
+            }
+            /*Move the focus on NEXT again*/
+            else if(data->key == LV_KEY_NEXT) {
+                /*In editing mode send DOWN key*/
+                if(lv_group_get_editing(g)) {
+                    lv_group_send_data(g, LV_KEY_DOWN);
+                } else {
+                    lv_group_focus_next(g);
+                    if(indev_reset_check(&i->proc)) return;
+                }
+                if(indev_reset_check(&i->proc)) return;
+            }
+            /*Move the focus on PREV again*/
+            else if(data->key == LV_KEY_PREV) {
+                /*In editing mode send UP key*/
+                if(lv_group_get_editing(g)) {
+                    lv_group_send_data(g, LV_KEY_UP);
+                } else {
+                    lv_group_focus_prev(g);
+                    if(indev_reset_check(&i->proc)) return;
+                }
+            }
+            /*Just send other keys again to the object (e.g. 'A' or `LV_GORUP_KEY_RIGHT)*/
+            else {
+                lv_group_send_data(g, data->key);
+                if(indev_reset_check(&i->proc)) return;
+            }
+        }
+    }
+    /*Release happened*/
+    else if(data->state == LV_INDEV_STATE_REL && prev_state == LV_INDEV_STATE_PR) {
+        /*The user might clear the key when it was released. Always release the pressed key*/
+        data->key = prev_key;
+        if(data->key == LV_KEY_ENTER) {
+
+            indev_obj_act->signal_cb(indev_obj_act, LV_SIGNAL_RELEASED, NULL);
+            if(indev_reset_check(&i->proc)) return;
+
+            if(i->proc.long_pr_sent == 0) {
+                lv_event_send(indev_obj_act, LV_EVENT_SHORT_CLICKED, NULL);
+                if(indev_reset_check(&i->proc)) return;
+            }
+
+            lv_event_send(indev_obj_act, LV_EVENT_CLICKED, NULL);
+            if(indev_reset_check(&i->proc)) return;
+
+            lv_event_send(indev_obj_act, LV_EVENT_RELEASED, NULL);
+            if(indev_reset_check(&i->proc)) return;
+        }
+        i->proc.pr_timestamp = 0;
+        i->proc.long_pr_sent = 0;
+    }
+    indev_obj_act = NULL;
+#else
+    (void)data; /*Unused*/
+    (void)i;    /*Unused*/
+#endif
 }
