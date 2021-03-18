@@ -1634,6 +1634,8 @@ static void indev_keypad2_proc(lv_indev_t * i, lv_indev_data_t * data)
                 lv_group_send_data(g, LV_KEY_ESC);
 
                 lv_event_send(indev_obj_act, LV_EVENT_CANCEL, NULL);
+                lv_event_send(lv_scr_act(), LV_EVENT_CANCEL, NULL);
+
                 if(indev_reset_check(&i->proc)) return;
             }
         }
@@ -1716,6 +1718,15 @@ static void indev_keypad2_proc(lv_indev_t * i, lv_indev_data_t * data)
                     lv_group_focus_prev(g);
                     if(indev_reset_check(&i->proc)) return;
                 }
+            }
+            //send repeated CANCEL
+            else if(data->key == LV_KEY_ESC) {
+                lv_group_send_data(g, LV_KEY_ESC);
+
+                lv_event_send(indev_obj_act, LV_EVENT_CANCEL, NULL);
+                lv_event_send(lv_scr_act(), LV_EVENT_CANCEL, NULL);
+
+                if(indev_reset_check(&i->proc)) return;
             }
             /*Just send other keys again to the object (e.g. 'A' or `LV_GORUP_KEY_RIGHT)*/
             else {

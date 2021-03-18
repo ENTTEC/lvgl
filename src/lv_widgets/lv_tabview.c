@@ -819,7 +819,9 @@ static void tab_btnm_event_cb(lv_obj_t * tab_btnm, lv_event_t event)
 {
     if(event != LV_EVENT_CLICKED) return;
 
-    uint16_t btn_id = lv_btnmatrix_get_active_btn(tab_btnm);
+    //repeated click on focused btn leads to read id as zero
+    //fix by getting id of focused btn
+    uint16_t btn_id = lv_btnmatrix_get_focused_btn(tab_btnm);
     if(btn_id == LV_BTNMATRIX_BTN_NONE) return;
 
     if(lv_btnmatrix_get_btn_ctrl(tab_btnm, btn_id, LV_BTNMATRIX_CTRL_DISABLED)) return;
